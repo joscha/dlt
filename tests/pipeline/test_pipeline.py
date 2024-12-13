@@ -10,6 +10,7 @@ import threading
 from time import sleep
 from typing import Any, List, Tuple, cast
 from tenacity import retry_if_exception, Retrying, stop_after_attempt
+from dlt.common.typing import TDataItems
 
 import pytest
 from dlt.common.storages import FileStorage
@@ -62,6 +63,7 @@ from tests.pipeline.utils import (
     load_data_table_counts,
     load_tables_to_dicts,
     many_delayed,
+    table_exists,
 )
 
 from dlt.destinations.dataset import get_destination_client_initial_config
@@ -2987,3 +2989,60 @@ def test_push_table_with_upfront_schema() -> None:
     copy_pipeline = dlt.pipeline(pipeline_name="push_table_copy_pipeline", destination="duckdb")
     info = copy_pipeline.run(data, table_name="events", schema=copy_schema)
     assert copy_pipeline.default_schema.version_hash != infer_hash
+
+
+@pytest.mark.parametrize("limit", (None, 2))
+def test_limit_keeps_original_type(limit: int) -> None:
+    def _create_resource(name: str):
+        @dlt.resource(
+            parallelized=True,
+            name=name
+        )
+        def xes():
+            @dlt.defer
+            async def _gen(idx):
+                await asyncio.sleep(1)
+                return [i for i in range(idx*10,idx*20)]
+            for idx_ in range(2):
+                yield _gen(idx_)
+        xes.__name__ = name
+        xes.__qualname__ = name
+
+        if limit is not None:
+            xes.add_limit(limit)
+        return xes
+
+    @dlt.transformer(
+        data_from=_create_resource("a"),
+        parallelized=True
+    )
+    def transformed_xes(
+        xes_arr: List[int]
+    ):
+        yield from xes_arr
+
+    @dlt.transformer(
+        data_from=_create_resource("b"),
+        parallelized=True
+    )
+    def transformed_xes2(
+        xes_arr: List[int]
+    ):
+        yield from xes_arr
+
+    @dlt.source()
+    def source():
+        return (
+            transformed_xes,
+            transformed_xes2
+        )
+
+
+    pipeline_name = "pipe_" + uniq_id()
+    p = dlt.pipeline(pipeline_name=pipeline_name, destination="duckdb")
+
+    load_info = p.run(source())
+    assert_load_info(load_info)
+
+    assert table_exists(p, "transformed_xes")
+    assert table_exists(p, "transformed_xes2")

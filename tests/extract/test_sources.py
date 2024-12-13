@@ -1,5 +1,5 @@
 import itertools
-from typing import Iterator
+from typing import Iterator, List
 
 import pytest
 import asyncio
@@ -30,6 +30,8 @@ from dlt.extract.exceptions import (
     ResourcesNotFoundError,
 )
 from dlt.extract.pipe import Pipe
+from tests.pipeline.utils import table_exists
+from tests.utils import assert_load_info
 
 
 @pytest.fixture(autouse=True)
@@ -807,6 +809,60 @@ def test_add_transform_steps() -> None:
         .add_filter(lambda i: len(i) == 2, 2)
     )
     assert list(r) == ["2", "2"]
+
+
+@pytest.mark.parametrize("limit", (None, 2))
+def test_limit_keeps_original_type(limit: int) -> None:
+    def _create_resource(name: str):
+        @dlt.resource(
+            parallelized=True,
+            name=name
+        )
+        def xes():
+            @dlt.defer
+            async def _gen(idx):
+                await asyncio.sleep(0.1)
+                return [i for i in range(idx*10,idx*20)]
+            for idx_ in range(2):
+                yield _gen(idx_)
+        xes.__name__ = name
+        xes.__qualname__ = name
+
+        if limit is not None:
+            xes.add_limit(limit)
+        return xes
+
+    @dlt.transformer(
+        data_from=_create_resource("a"),
+        parallelized=True
+    )
+    def transformed_xes(
+        xes_arr: List[TDataItems]
+    ):
+        yield from xes_arr
+
+    @dlt.transformer(
+        data_from=_create_resource("b"),
+        parallelized=True
+    )
+    def transformed_xes2(
+        xes_arr: List[TDataItems]
+    ):
+        yield from xes_arr
+
+    @dlt.source()
+    def source():
+        return (
+            transformed_xes,
+            transformed_xes2
+        )
+
+    pipeline = dlt.pipeline(destination="duckdb")
+    load_info = pipeline.run(source())
+    assert_load_info(load_info)
+
+    assert table_exists(pipeline, "transformed_xes")
+    assert table_exists(pipeline, "transformed_xes2")
 
 
 def test_add_transform_steps_pipe() -> None:
